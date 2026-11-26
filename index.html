@@ -192,6 +192,23 @@ textarea.i{min-height:96px;resize:vertical}
 #shareSheet button{display:block;width:100%;padding:14px;border-radius:10px;border:0;font-size:16px;font-weight:700;margin-top:8px}
 #shareSheet .go{background:#1f4e8c;color:#fff}#shareSheet .no{background:#eee;color:#333}
 
+/* fotos */
+.fotos-acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.fotos-acts .btn{flex:1 1 140px}
+.fotos-acts input{display:none}
+.fotos{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px;margin-top:10px}
+.fotos:empty{display:none}
+.foto{position:relative;aspect-ratio:1;border-radius:10px;overflow:hidden;border:1px solid var(--line);background:#f2f4f7}
+.foto img{width:100%;height:100%;object-fit:cover;display:block;cursor:zoom-in}
+.foto button{position:absolute;top:4px;right:4px;width:30px;height:30px;border-radius:50%;border:0;background:rgba(0,0,0,.6);color:#fff;font-size:15px;line-height:30px;padding:0;cursor:pointer}
+#fotoView{position:fixed;inset:0;background:rgba(0,0,0,.88);display:none;align-items:center;justify-content:center;z-index:9998;padding:12px}
+#fotoView.show{display:flex}
+#fotoView img{max-width:100%;max-height:100%;border-radius:6px}
+#pdfbox .r-fotos,#report .r-fotos{display:grid;grid-template-columns:1fr 1fr;gap:8pt;margin-top:8pt}
+#pdfbox .r-fotos img,#report .r-fotos img{width:100%;height:auto;max-height:110mm;object-fit:contain;border:.6pt solid #888;background:#fff}
+#pdfbox .r-fh,#report .r-fh{font-size:13pt;font-weight:800;color:var(--blue);margin:0 0 4pt}
+@media print{ #report .r-fpage{page-break-before:always;break-before:page} }
+
 /* print report */
 #report{display:none}
 @media print{
@@ -287,8 +304,14 @@ textarea.i{min-height:96px;resize:vertical}
   </section>
 
   <section class="card" aria-labelledby="h5">
-    <h2 id="h5"><span class="n">5</span>Observaciones</h2>
+    <h2 id="h5"><span class="n">5</span>Observaciones y fotos</h2>
     <textarea class="i" id="obs" placeholder="Comentarios sobre el ejemplar…"></textarea>
+    <div class="fotos-acts">
+      <label class="btn sec" for="fotoCam">📷 Hacer foto</label><input type="file" id="fotoCam" accept="image/*" capture="environment">
+      <label class="btn sec" for="fotoLib">🖼️ Subir fotos</label><input type="file" id="fotoLib" accept="image/*" multiple>
+    </div>
+    <div class="fotos" id="fotos"></div>
+    <p class="hint" id="fotoInfo" style="margin:8px 0 0">Hasta 6 fotos por ejemplar. Se guardan en este móvil y salen en el PDF.</p>
   </section>
 
   <section class="card" aria-labelledby="h6">
@@ -334,6 +357,7 @@ textarea.i{min-height:96px;resize:vertical}
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div id="report"></div>
 <div id="pdfbox" aria-hidden="true"></div>
+<div id="fotoView" role="dialog" aria-label="Foto"><img alt=""></div>
 <div id="shareSheet" role="dialog" aria-modal="true"><div class="box"><p id="shareMsg">Archivo listo</p><button class="go" id="shareGo" type="button">Guardar / compartir</button><button class="no" id="shareNo" type="button">Cancelar</button></div></div>
 
 <script>
@@ -375,10 +399,42 @@ const uid = ()=> 'vp-'+Date.now().toString(36)+'-'+Math.random().toString(36).sl
 const fmtDate = s=>{ if(!s) return ''; const p=s.split('-'); return p.length===3? p[2]+'/'+p[1]+'/'+p[0] : s; };
 const num = v=> v==null? '' : (Math.round(v*100)/100).toString().replace('.',',');
 
+/* ---------- fotos: se guardan en IndexedDB (más espacio que localStorage) ---------- */
+const MAX_FOTOS=6;
+const FOTOS = (()=>{
+  let dbp=null; const mem=new Map();
+  function db(){ if(dbp) return dbp; dbp=new Promise(res=>{ try{ const r=indexedDB.open('vp-fotos',1); r.onupgradeneeded=()=>r.result.createObjectStore('f'); r.onsuccess=()=>res(r.result); r.onerror=()=>res(null); }catch(e){ res(null); } }); return dbp; }
+  async function tx(mode,fn){ const d=await db(); if(!d) return null; return new Promise(res=>{ try{ const t=d.transaction('f',mode); const st=t.objectStore('f'); const r=fn(st); t.oncomplete=()=>res(r&&r.result); t.onerror=()=>res(null); }catch(e){ res(null); } }); }
+  return {
+    async put(id,data){ mem.set(id,data); await tx('readwrite',st=>st.put(data,id)); },
+    async get(id){ if(mem.has(id)) return mem.get(id); const v=await tx('readonly',st=>st.get(id)); if(v) mem.set(id,v); return v||null; },
+    async del(id){ mem.delete(id); await tx('readwrite',st=>st.delete(id)); },
+    async keys(){ const k=await tx('readonly',st=>st.getAllKeys()); return k||[...mem.keys()]; },
+    cached(id){ return mem.get(id)||null; }
+  };
+})();
+/* reduce la foto a 1600 px como máximo (JPEG) para no llenar el móvil */
+function compressImage(file){
+  return new Promise((res,rej)=>{
+    const url=URL.createObjectURL(file); const img=new Image();
+    img.onload=()=>{ const max=1600; let w=img.naturalWidth,h=img.naturalHeight; const k=Math.min(1,max/Math.max(w,h)); w=Math.round(w*k); h=Math.round(h*k);
+      const c=document.createElement('canvas'); c.width=w; c.height=h; const g=c.getContext('2d'); g.fillStyle='#fff'; g.fillRect(0,0,w,h); g.drawImage(img,0,0,w,h);
+      URL.revokeObjectURL(url); res(c.toDataURL('image/jpeg',0.8)); };
+    img.onerror=()=>{ URL.revokeObjectURL(url); rej(new Error('img')); };
+    img.src=url;
+  });
+}
+async function fotosGC(){ // borra fotos que ya no usa ninguna valoración
+  const used=new Set([].concat(...LS.get('vp-saved',[]).map(v=>v.fotos||[]), S.fotos||[]));
+  for(const k of await FOTOS.keys()) if(!used.has(k)) await FOTOS.del(k);
+}
+async function loadFotos(ids){ const out=[]; for(const id of (ids||[])){ const d=await FOTOS.get(id); if(d) out.push(d); } return out; }
+
 function blank(ficha){
-  return {id:uid(), ficha:ficha||'m18', datos:{nombre:'',nacimiento:'',alzada:'',peso:'',evaluador:LS.get('vp-evaluador',''),fecha:today()}, punt:{}, marcas:[], obs:'', estado:'borrador', guardado:null};
+  return {id:uid(), ficha:ficha||'m18', datos:{nombre:'',nacimiento:'',alzada:'',peso:'',evaluador:LS.get('vp-evaluador',''),fecha:today()}, punt:{}, marcas:[], fotos:[], obs:'', estado:'borrador', guardado:null};
 }
 let S = LS.get('vp-draft', null) || blank();
+if(!S.fotos) S.fotos=[];
 let mode = '+';
 
 /* ---------- calculations ---------- */
@@ -450,7 +506,13 @@ function renderSaved(){
   }).join('');
   $('btnResend').style.display = ENDPOINT ? '' : 'none';
 }
-function renderAll(){ renderFicha(); renderData(); renderMarks(); renderSaved(); }
+async function renderFotos(){
+  const box=$('fotos'); const ids=(S.fotos||[]).slice(); let h='';
+  for(const id of ids){ const d=await FOTOS.get(id); if(d) h+=`<div class="foto"><img src="${d}" data-view="${id}" alt="Foto del ejemplar"><button type="button" data-delfoto="${id}" aria-label="Quitar foto">✕</button></div>`; }
+  box.innerHTML=h;
+  $('fotoInfo').textContent = ids.length ? `${ids.length} de ${MAX_FOTOS} fotos · se guardan en este móvil y salen en el PDF` : `Hasta ${MAX_FOTOS} fotos por ejemplar. Se guardan en este móvil y salen en el PDF.`;
+}
+function renderAll(){ if(!S.fotos) S.fotos=[]; renderFicha(); renderData(); renderMarks(); renderFotos(); renderSaved(); }
 
 /* ---------- events ---------- */
 function persist(){ LS.set('vp-draft',S); }
@@ -470,6 +532,25 @@ $('scoring').addEventListener('click',e=>{
 });
 ['nombre','nacimiento','alzada','peso','evaluador','fecha'].forEach(k=>$(k).addEventListener('input',()=>{ S.datos[k]=$(k).value; if(k==='evaluador') LS.set('vp-evaluador',$(k).value); persist(); }));
 $('obs').addEventListener('input',()=>{ S.obs=$('obs').value; persist(); });
+async function addFotos(files){
+  files=[...(files||[])]; if(!files.length) return;
+  const libres=MAX_FOTOS-(S.fotos||[]).length;
+  if(libres<=0){ toast(`Máximo ${MAX_FOTOS} fotos por ejemplar`); return; }
+  if(files.length>libres) toast(`Solo se añaden ${libres} (máximo ${MAX_FOTOS})`);
+  let n=0;
+  for(const f of files.slice(0,libres)){
+    try{ const d=await compressImage(f); const id='ft-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,6); await FOTOS.put(id,d); S.fotos.push(id); n++; }
+    catch(e){ toast('No se pudo leer una de las fotos'); }
+  }
+  if(n){ persist(); await renderFotos(); toast(n===1?'Foto añadida':`${n} fotos añadidas`); }
+}
+['fotoCam','fotoLib'].forEach(id=>$(id).addEventListener('change',e=>{ addFotos(e.target.files).finally(()=>{ e.target.value=''; }); }));
+$('fotos').addEventListener('click',e=>{
+  const d=e.target.closest('[data-delfoto]'), v=e.target.closest('[data-view]');
+  if(d){ if(confirm('¿Quitar esta foto?')){ S.fotos=S.fotos.filter(x=>x!==d.dataset.delfoto); persist(); renderFotos(); fotosGC(); } return; }
+  if(v){ const fv=$('fotoView'); fv.querySelector('img').src=v.src; fv.classList.add('show'); }
+});
+$('fotoView').addEventListener('click',()=>$('fotoView').classList.remove('show'));
 
 document.querySelectorAll('.tool[data-mode]').forEach(b=>b.addEventListener('click',()=>{
   mode=b.dataset.mode; document.querySelectorAll('.tool[data-mode]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));
@@ -511,6 +592,7 @@ function flat(v){
   o.nmas=c.mas; o.nmenos=c.menos;
   o.marcas = v.marcas.map(m=>`${m.t}(${Math.round(m.x/13.76)},${Math.round(m.y/3.86)})`).join(' ');
   o.obs=v.obs||'';
+  o.nfotos=(v.fotos||[]).length;
   return o;
 }
 async function send(v){
@@ -543,17 +625,22 @@ window.addEventListener('online',()=>resendPending(true));
 $('btnNew').addEventListener('click',()=>{
   const dirty = S.datos.nombre || Object.keys(S.punt).length || S.marcas.length;
   if(dirty && !S.guardado && !confirm('Esta valoración no está guardada. ¿Empezar una nueva?')) return;
-  S=blank(S.ficha); persist(); renderAll(); window.scrollTo({top:0,behavior:'smooth'}); toast('Nueva valoración');
+  S=blank(S.ficha); persist(); renderAll(); fotosGC(); window.scrollTo({top:0,behavior:'smooth'}); toast('Nueva valoración');
 });
 $('savedList').addEventListener('click',e=>{
   const o=e.target.closest('[data-open]'), d=e.target.closest('[data-del]');
   const list=LS.get('vp-saved',[]);
-  if(o){ const v=list.find(x=>x.id===o.dataset.open); if(v){ S=JSON.parse(JSON.stringify(v)); persist(); renderAll(); window.scrollTo({top:0,behavior:'smooth'}); toast('Valoración abierta: '+(v.datos.nombre||'')); } }
-  if(d){ const v=list.find(x=>x.id===d.dataset.del); if(v && confirm(`¿Eliminar la valoración de «${v.datos.nombre||'(sin nombre)'}» de este móvil?`)){ LS.set('vp-saved',list.filter(x=>x.id!==v.id)); renderSaved(); } }
+  if(o){ const v=list.find(x=>x.id===o.dataset.open); if(v){ S=JSON.parse(JSON.stringify(v)); if(!S.fotos) S.fotos=[]; persist(); renderAll(); window.scrollTo({top:0,behavior:'smooth'}); toast('Valoración abierta: '+(v.datos.nombre||'')); } }
+  if(d){ const v=list.find(x=>x.id===d.dataset.del); if(v && confirm(`¿Eliminar la valoración de «${v.datos.nombre||'(sin nombre)'}» de este móvil?`)){ LS.set('vp-saved',list.filter(x=>x.id!==v.id)); renderSaved(); fotosGC(); } }
 });
 
 /* ---------- PDF (print) ---------- */
 const EUFLAG = document.querySelector('.eu svg') ? document.querySelector('.eu svg').outerHTML : '';
+function fotosHTML(v,datas){
+  if(!datas||!datas.length) return '';
+  return `<div class="r-fpage"><div class="r-hdr"><img class="c" src="${document.querySelector('.logo-cenre').src}" alt=""><img class="e" src="${document.querySelector('.logo-eh').src}" alt=""></div>
+  <p class="r-fh">Fotos · ${esc(v.datos.nombre)} · ${fmtDate(v.datos.fecha)}</p><div class="r-fotos">${datas.map(d=>`<img src="${d}" alt="">`).join('')}</div></div>`;
+}
 function reportHTML(v){
   const F=FICHAS[v.ficha], c=calc(v);
   let rows='';
@@ -603,23 +690,28 @@ function shareOrDownload(blob,name,label){
   }
   download(blob,name);
 }
-async function makePDF(v,fname){
-  await loadPDFLibs();
-  const box=$('pdfbox'); box.innerHTML=reportHTML(v);
+async function renderToPages(pdf,html,first){
+  const box=$('pdfbox'); box.innerHTML=html;
   await Promise.all([...box.querySelectorAll('img')].map(im=>im.complete?0:new Promise(r=>{im.onload=im.onerror=r;})));
-  if(document.fonts && document.fonts.ready) await document.fonts.ready;
   const canvas=await window.html2canvas(box,{scale:2,backgroundColor:'#ffffff',useCORS:true,logging:false,windowWidth:box.scrollWidth});
   box.innerHTML='';
-  const {jsPDF}=window.jspdf; const pdf=new jsPDF({unit:'mm',format:'a4',orientation:'portrait'});
   const mx=12, my=11, W=210-2*mx, H=297-2*my;
   const pxPerMm=canvas.width/W, pageH=Math.floor(H*pxPerMm);
   for(let y=0,p=0; y<canvas.height; y+=pageH,p++){
     const h=Math.min(pageH,canvas.height-y);
     const c=document.createElement('canvas'); c.width=canvas.width; c.height=h;
     const g=c.getContext('2d'); g.fillStyle='#fff'; g.fillRect(0,0,c.width,h); g.drawImage(canvas,0,y,canvas.width,h,0,0,canvas.width,h);
-    if(p) pdf.addPage();
-    pdf.addImage(c.toDataURL('image/jpeg',0.92),'JPEG',mx,my,W,h/pxPerMm);
+    if(!(first&&p===0)) pdf.addPage();
+    pdf.addImage(c.toDataURL('image/jpeg',0.9),'JPEG',mx,my,W,h/pxPerMm);
   }
+}
+async function makePDF(v,fname){
+  await loadPDFLibs();
+  if(document.fonts && document.fonts.ready) await document.fonts.ready;
+  const {jsPDF}=window.jspdf; const pdf=new jsPDF({unit:'mm',format:'a4',orientation:'portrait'});
+  await renderToPages(pdf,reportHTML(v),true);
+  const datas=await loadFotos(v.fotos);
+  for(let i=0;i<datas.length;i+=4) await renderToPages(pdf,fotosHTML(v,datas.slice(i,i+4)),false);
   return pdf.output('blob');
 }
 $('btnPDF').addEventListener('click',async()=>{
@@ -630,14 +722,17 @@ $('btnPDF').addEventListener('click',async()=>{
     try{ const blob=await makePDF(S,base+'.pdf'); await shareOrDownload(blob,base+'.pdf','PDF'); return; }
     catch(e){ $('pdfbox').innerHTML=''; toast('No se pudo generar el PDF aquí. Se abre Imprimir.'); }
   }
-  $('report').innerHTML=reportHTML(S);
+  const datas=await loadFotos(S.fotos); let fh='';
+  for(let i=0;i<datas.length;i+=4) fh+=fotosHTML(S,datas.slice(i,i+4));
+  $('report').innerHTML=reportHTML(S)+fh;
+  await Promise.all([...$('report').querySelectorAll('img')].map(im=>im.complete?0:new Promise(r=>{im.onload=im.onerror=r;})));
   const old=document.title; document.title=base;
   setTimeout(()=>{ window.print(); document.title=old; },60);
 });
 
 /* ---------- Excel ---------- */
 const COLS = [['ficha','Ficha'],['nombre','Ejemplar'],['nacimiento','Fecha nacimiento'],['alzada','Alzada (cm)'],['peso','Peso (kg)'],['evaluador','Evaluador'],['fecha','Fecha evaluación'],['escala','Escala']]
-  .concat(ITEMS.map(i=>[i.k,i.l])).concat([['m1','Media Aires/Movimientos'],['m2','Media Morfología'],['m3','Media Comportamiento'],['mg','Media global'],['nmas','Marcas (+)'],['nmenos','Marcas (−)'],['marcas','Marcas: posición en % (x,y)'],['obs','Observaciones'],['id','ID']]);
+  .concat(ITEMS.map(i=>[i.k,i.l])).concat([['m1','Media Aires/Movimientos'],['m2','Media Morfología'],['m3','Media Comportamiento'],['mg','Media global'],['nmas','Marcas (+)'],['nmenos','Marcas (−)'],['marcas','Marcas: posición en % (x,y)'],['obs','Observaciones'],['nfotos','Nº fotos'],['id','ID']]);
 function loadXLSX(){ return new Promise((res,rej)=>{ if(window.XLSX) return res(window.XLSX); const s=document.createElement('script'); s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'; s.onload=()=>res(window.XLSX); s.onerror=rej; document.head.appendChild(s); }); }
 function download(blob,name){ const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(a.href); a.remove();},500); }
 async function exportXLS(list,name){
@@ -659,7 +754,7 @@ $('btnXLS').addEventListener('click',()=>{ if(!S.datos.nombre.trim()){ toast('Es
 $('btnXLSAll').addEventListener('click',()=>exportXLS(LS.get('vp-saved',[]),`Valoraciones_potros_${today()}`));
 
 /* ---------- init ---------- */
-renderAll();
+renderAll(); fotosGC();
 if(ENDPOINT && navigator.onLine) setTimeout(()=>resendPending(true),1500);
 if(navigator.onLine) setTimeout(()=>{ loadXLSX().catch(()=>{}); if(USE_SHARE) loadPDFLibs().catch(()=>{}); },2500);
 if('serviceWorker' in navigator && location.protocol==='https:'){ window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{})); }
