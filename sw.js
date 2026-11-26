@@ -1,8 +1,8 @@
 /* Valoración de potros · CENRE – Yeguada Cartuja · EUnetHorse
    Service worker: permite usar la app sin conexión tras abrirla una vez. */
-const CACHE = 'valoracion-potros-v2';
+const CACHE = 'valoracion-potros-v3';
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(['./', './index.html'])).catch(() => {}));
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(['./', './index.html', './html5-qrcode.min.js'])).catch(() => {}));
   self.skipWaiting();
 });
 self.addEventListener('activate', e => {

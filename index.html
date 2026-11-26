@@ -192,6 +192,18 @@ textarea.i{min-height:96px;resize:vertical}
 #shareSheet button{display:block;width:100%;padding:14px;border-radius:10px;border:0;font-size:16px;font-weight:700;margin-top:8px}
 #shareSheet .go{background:#1f4e8c;color:#fff}#shareSheet .no{background:#eee;color:#333}
 
+/* identificación + escáner */
+.idrow{display:flex;gap:6px}
+.idrow .i{flex:1;min-width:0;font-variant-numeric:tabular-nums;letter-spacing:.3px}
+.idrow .scan{flex:none;min-height:44px;padding:0 12px;border-radius:10px;border:1.5px solid var(--blue);background:#fff;color:var(--blue);font-weight:700;font-size:14px;cursor:pointer;white-space:nowrap}
+.idwarn{display:block;font-size:12px;color:#a15c00;margin-top:3px;min-height:0}
+.idwarn:empty{display:none}
+#scanView{position:fixed;inset:0;background:#000;display:none;flex-direction:column;z-index:9999}
+#scanView.show{display:flex}
+#scanView .top{color:#fff;padding:calc(12px + env(safe-area-inset-top)) 16px 10px;font-size:15px;text-align:center}
+#scanReader{flex:1;width:100%;overflow:hidden}
+#scanReader video{object-fit:cover}
+#scanView button{margin:12px 16px calc(16px + env(safe-area-inset-bottom));min-height:50px;border-radius:12px;border:0;font-size:16px;font-weight:700;background:#fff;color:#222}
 /* fotos */
 .fotos-acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
 .fotos-acts .btn{flex:1 1 140px}
@@ -272,6 +284,8 @@ textarea.i{min-height:96px;resize:vertical}
     <h2 id="h2"><span class="n">2</span>Datos del ejemplar</h2>
     <div class="grid">
       <div class="full"><label class="f" for="nombre">Nombre del ejemplar *</label><input class="i" id="nombre" autocomplete="off" placeholder="Nombre o identificación"></div>
+      <div class="full"><label class="f" for="microchip">Microchip</label><div class="idrow"><input class="i" id="microchip" inputmode="numeric" autocomplete="off" maxlength="20" placeholder="15 dígitos"><button class="scan" type="button" data-scan="microchip">▦ Escanear</button></div><span class="idwarn" id="microchipWarn"></span></div>
+      <div class="full"><label class="f" for="ueln">UELN</label><div class="idrow"><input class="i" id="ueln" autocomplete="off" autocapitalize="characters" maxlength="20" placeholder="15 caracteres (p. ej. 724…)"><button class="scan" type="button" data-scan="ueln">▦ Escanear</button></div><span class="idwarn" id="uelnWarn"></span></div>
       <div><label class="f" for="nacimiento">Fecha de nacimiento</label><input class="i" id="nacimiento" type="date"></div>
       <div><label class="f" for="fecha">Fecha de evaluación</label><input class="i" id="fecha" type="date"></div>
       <div><label class="f" for="alzada">Alzada</label><div class="unit"><input class="i" id="alzada" type="number" inputmode="decimal" min="0" step="0.5"><em>cm</em></div></div>
@@ -357,6 +371,7 @@ textarea.i{min-height:96px;resize:vertical}
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div id="report"></div>
 <div id="pdfbox" aria-hidden="true"></div>
+<div id="scanView" role="dialog" aria-label="Escanear código"><div class="top" id="scanTitle">Apunta al código de barras</div><div id="scanReader"></div><button type="button" id="scanClose">Cancelar</button></div>
 <div id="fotoView" role="dialog" aria-label="Foto"><img alt=""></div>
 <div id="shareSheet" role="dialog" aria-modal="true"><div class="box"><p id="shareMsg">Archivo listo</p><button class="go" id="shareGo" type="button">Guardar / compartir</button><button class="no" id="shareNo" type="button">Cancelar</button></div></div>
 
@@ -431,11 +446,42 @@ async function fotosGC(){ // borra fotos que ya no usa ninguna valoración
 async function loadFotos(ids){ const out=[]; for(const id of (ids||[])){ const d=await FOTOS.get(id); if(d) out.push(d); } return out; }
 
 function blank(ficha){
-  return {id:uid(), ficha:ficha||'m18', datos:{nombre:'',nacimiento:'',alzada:'',peso:'',evaluador:LS.get('vp-evaluador',''),fecha:today()}, punt:{}, marcas:[], fotos:[], obs:'', estado:'borrador', guardado:null};
+  return {id:uid(), ficha:ficha||'m18', datos:{nombre:'',microchip:'',ueln:'',nacimiento:'',alzada:'',peso:'',evaluador:LS.get('vp-evaluador',''),fecha:today()}, punt:{}, marcas:[], fotos:[], obs:'', estado:'borrador', guardado:null};
 }
 let S = LS.get('vp-draft', null) || blank();
 if(!S.fotos) S.fotos=[];
 let mode = '+';
+
+/* ---------- identificación: microchip y UELN ---------- */
+function cleanId(k,v){ v=String(v||'').toUpperCase().replace(/[\s.\-_/]/g,''); return k==='microchip' ? v.replace(/\D/g,'') : v.replace(/[^0-9A-Z]/g,''); }
+function checkIds(){
+  const m=$('microchip').value, u=$('ueln').value;
+  $('microchipWarn').textContent = m && m.length!==15 ? `Tiene ${m.length} dígitos; el microchip ISO suele tener 15.` : '';
+  $('uelnWarn').textContent = u && u.length!==15 ? `Tiene ${u.length} caracteres; el UELN tiene 15.` : '';
+}
+let scanner=null, scanField=null;
+function loadScanner(){ return loadScript('html5-qrcode.min.js',()=>!!window.Html5Qrcode); }
+async function stopScan(){ try{ if(scanner){ await scanner.stop(); scanner.clear(); } }catch(e){} scanner=null; $('scanView').classList.remove('show'); }
+async function startScan(field){
+  scanField=field;
+  $('scanTitle').textContent = field==='microchip' ? 'Apunta al código de barras del microchip (pegatina del pasaporte)' : 'Apunta al código del UELN en el pasaporte';
+  $('scanView').classList.add('show');
+  try{
+    await loadScanner();
+    const F=window.Html5QrcodeSupportedFormats;
+    scanner=new window.Html5Qrcode('scanReader',{formatsToSupport:[F.CODE_128,F.CODE_39,F.EAN_13,F.ITF,F.CODABAR,F.CODE_93,F.QR_CODE,F.DATA_MATRIX],verbose:false,experimentalFeatures:{useBarCodeDetectorIfSupported:true}});
+    const w=Math.min(window.innerWidth-40,420);
+    await scanner.start({facingMode:'environment'},{fps:12,qrbox:{width:w,height:Math.round(w*0.45)}},txt=>{
+      const v=cleanId(scanField,txt); if(!v) return;
+      $(scanField).value=v; S.datos[scanField]=v; persist(); checkIds();
+      if(navigator.vibrate) navigator.vibrate(80);
+      stopScan(); toast((scanField==='microchip'?'Microchip':'UELN')+' leído: '+v);
+    },()=>{});
+  }catch(e){
+    await stopScan();
+    toast(String(e&&e.name||e).includes('NotAllowed') ? 'Sin permiso para usar la cámara' : 'No se pudo abrir el escáner. Escribe el número a mano.');
+  }
+}
 
 /* ---------- calculations ---------- */
 function calc(st){
@@ -470,7 +516,7 @@ function renderFicha(){
 function valTxt(k){ const F=FICHAS[S.ficha], v=S.punt[k]; if(v==null) return 'sin puntuar'; if(F.escala.length===3) return F.escala.find(o=>o.v===v).l; return v+'/5'+(v===1?' · Poco correcto':v===5?' · Excelente':''); }
 function valChip(k){ return `<span class="val${S.punt[k]!=null?' on':''}" id="val-${k}">${esc(valTxt(k))}</span>`; }
 function renderData(){
-  ['nombre','nacimiento','alzada','peso','evaluador','fecha'].forEach(k=>{ $(k).value=S.datos[k]||''; });
+  ['nombre','microchip','ueln','nacimiento','alzada','peso','evaluador','fecha'].forEach(k=>{ $(k).value=S.datos[k]||''; }); checkIds();
   $('obs').value=S.obs||'';
 }
 function renderMarks(){
@@ -530,7 +576,7 @@ $('scoring').addEventListener('click',e=>{
   const vc=document.getElementById('val-'+k); if(vc){ vc.textContent=valTxt(k); vc.classList.toggle('on', S.punt[k]!=null); }
   persist(); renderSummary();
 });
-['nombre','nacimiento','alzada','peso','evaluador','fecha'].forEach(k=>$(k).addEventListener('input',()=>{ S.datos[k]=$(k).value; if(k==='evaluador') LS.set('vp-evaluador',$(k).value); persist(); }));
+['nombre','microchip','ueln','nacimiento','alzada','peso','evaluador','fecha'].forEach(k=>$(k).addEventListener('input',()=>{ if(k==='microchip'||k==='ueln'){ const c=cleanId(k,$(k).value); if(c!==$(k).value) $(k).value=c; checkIds(); } S.datos[k]=$(k).value; if(k==='evaluador') LS.set('vp-evaluador',$(k).value); persist(); }));
 $('obs').addEventListener('input',()=>{ S.obs=$('obs').value; persist(); });
 async function addFotos(files){
   files=[...(files||[])]; if(!files.length) return;
@@ -551,6 +597,8 @@ $('fotos').addEventListener('click',e=>{
   if(v){ const fv=$('fotoView'); fv.querySelector('img').src=v.src; fv.classList.add('show'); }
 });
 $('fotoView').addEventListener('click',()=>$('fotoView').classList.remove('show'));
+document.querySelectorAll('[data-scan]').forEach(b=>b.addEventListener('click',()=>startScan(b.dataset.scan)));
+$('scanClose').addEventListener('click',stopScan);
 
 document.querySelectorAll('.tool[data-mode]').forEach(b=>b.addEventListener('click',()=>{
   mode=b.dataset.mode; document.querySelectorAll('.tool[data-mode]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));
@@ -582,7 +630,7 @@ function validate(){
 function upsertSaved(v){ const list=LS.get('vp-saved',[]); const i=list.findIndex(x=>x.id===v.id); if(i>=0) list[i]=v; else list.push(v); LS.set('vp-saved',list); }
 function flat(v){
   const c=calc(v), F=FICHAS[v.ficha];
-  const o={id:v.id, ficha:F.corto, nombre:v.datos.nombre, nacimiento:v.datos.nacimiento, alzada:v.datos.alzada, peso:v.datos.peso, evaluador:v.datos.evaluador, fecha:v.datos.fecha};
+  const o={id:v.id, ficha:F.corto, nombre:v.datos.nombre, microchip:v.datos.microchip||'', ueln:v.datos.ueln||'', nacimiento:v.datos.nacimiento, alzada:v.datos.alzada, peso:v.datos.peso, evaluador:v.datos.evaluador, fecha:v.datos.fecha};
   ITEMS.forEach(i=>{ o[i.k] = v.punt[i.k]!=null ? v.punt[i.k] : ''; });
   o.m1 = c.bloques[0].media!=null? +c.bloques[0].media.toFixed(2) : '';
   o.m2 = c.bloques[1].media!=null? +c.bloques[1].media.toFixed(2) : '';
@@ -652,7 +700,7 @@ function reportHTML(v){
   return `<div class="r-hdr"><img class="c" src="${document.querySelector('.logo-cenre').src}" alt=""><img class="e" src="${document.querySelector('.logo-eh').src}" alt=""></div>
   <p class="r-t">${esc(F.titulo)}</p>
   <div class="r-data">
-    <div><b>Nombre del ejemplar:</b> ${esc(v.datos.nombre)}</div><div><b>Fecha de nacimiento:</b> ${fmtDate(v.datos.nacimiento)}</div>
+    <div><b>Nombre del ejemplar:</b> ${esc(v.datos.nombre)}</div><div><b>Microchip:</b> ${esc(v.datos.microchip||'')}</div><div><b>UELN:</b> ${esc(v.datos.ueln||'')}</div><div><b>Fecha de nacimiento:</b> ${fmtDate(v.datos.nacimiento)}</div>
     <div><b>Alzada:</b> ${v.datos.alzada?esc(v.datos.alzada)+' cm':''}</div><div><b>Peso:</b> ${v.datos.peso?esc(v.datos.peso)+' kg':''}</div>
     <div><b>Evaluador:</b> ${esc(v.datos.evaluador)}</div><div><b>Fecha de evaluación:</b> ${fmtDate(v.datos.fecha)}</div>
   </div>
@@ -731,7 +779,7 @@ $('btnPDF').addEventListener('click',async()=>{
 });
 
 /* ---------- Excel ---------- */
-const COLS = [['ficha','Ficha'],['nombre','Ejemplar'],['nacimiento','Fecha nacimiento'],['alzada','Alzada (cm)'],['peso','Peso (kg)'],['evaluador','Evaluador'],['fecha','Fecha evaluación'],['escala','Escala']]
+const COLS = [['ficha','Ficha'],['nombre','Ejemplar'],['microchip','Microchip'],['ueln','UELN'],['nacimiento','Fecha nacimiento'],['alzada','Alzada (cm)'],['peso','Peso (kg)'],['evaluador','Evaluador'],['fecha','Fecha evaluación'],['escala','Escala']]
   .concat(ITEMS.map(i=>[i.k,i.l])).concat([['m1','Media Aires/Movimientos'],['m2','Media Morfología'],['m3','Media Comportamiento'],['mg','Media global'],['nmas','Marcas (+)'],['nmenos','Marcas (−)'],['marcas','Marcas: posición en % (x,y)'],['obs','Observaciones'],['nfotos','Nº fotos'],['id','ID']]);
 function loadXLSX(){ return new Promise((res,rej)=>{ if(window.XLSX) return res(window.XLSX); const s=document.createElement('script'); s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'; s.onload=()=>res(window.XLSX); s.onerror=rej; document.head.appendChild(s); }); }
 function download(blob,name){ const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(a.href); a.remove();},500); }
@@ -756,7 +804,7 @@ $('btnXLSAll').addEventListener('click',()=>exportXLS(LS.get('vp-saved',[]),`Val
 /* ---------- init ---------- */
 renderAll(); fotosGC();
 if(ENDPOINT && navigator.onLine) setTimeout(()=>resendPending(true),1500);
-if(navigator.onLine) setTimeout(()=>{ loadXLSX().catch(()=>{}); if(USE_SHARE) loadPDFLibs().catch(()=>{}); },2500);
+if(navigator.onLine) setTimeout(()=>{ loadXLSX().catch(()=>{}); if(USE_SHARE) loadPDFLibs().catch(()=>{}); fetch('html5-qrcode.min.js').catch(()=>{}); },2500);
 if('serviceWorker' in navigator && location.protocol==='https:'){ window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{})); }
 </script>
 </body>
